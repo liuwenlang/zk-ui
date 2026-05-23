@@ -28,7 +28,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -36,7 +36,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry & build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -63,7 +63,7 @@ jobs:
           mkdir -p dist/zk-ui.app/Contents/Resources
           cp target/${{ matrix.target }}/release/zk-ui dist/zk-ui.app/Contents/MacOS/
           cp Info.plist dist/zk-ui.app/Contents/
-          cd dist && zip -r ${{ matrix.artifact }}.app.zip zk-ui.app
+          zip -r ${{ matrix.artifact }}.app.zip dist/zk-ui.app
 
       # ── Windows: create .zip ──
       - name: Package Windows
@@ -75,7 +75,7 @@ jobs:
           Compress-Archive -Path dist/* -DestinationPath ${{ matrix.artifact }}.zip
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: |
@@ -91,12 +91,12 @@ jobs:
       contents: write
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: artifacts/**/*
           generate_release_notes: true
