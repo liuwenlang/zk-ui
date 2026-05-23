@@ -1,0 +1,7 @@
+/target
+/dist
+/.claude
+/openspec
+*.db
+*.sqlite
+.DS_Store

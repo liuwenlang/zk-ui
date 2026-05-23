@@ -1,0 +1,1 @@
+# No global rustflags - stack size is set via build.rs for binary target only

@@ -1,0 +1,31 @@
+[package]
+name = "zk-ui"
+version = "0.1.0"
+edition = "2021"
+default-run = "zk-ui"
+description = "A native desktop GUI for browsing and managing Apache ZooKeeper"
+license = "MIT"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+
+zookeeper = "0.8"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+clap = { version = "4", features = ["derive"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+anyhow = "1"
+thiserror = "2"
+
+chrono = "0.4"
+
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[patch.crates-io]
+zookeeper = { path = "vendor/zookeeper" }
