@@ -51,28 +51,36 @@ jobs:
       - name: Package Linux
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/zk-ui dist/
-          tar -czf ${{ matrix.artifact }}.tar.gz -C dist .
+          mkdir -p package
+          cp target/${{ matrix.target }}/release/zk-ui package/
+          tar -czf ${{ matrix.artifact }}.tar.gz -C package .
 
-      # ── macOS: create .app bundle ──
+      # ── macOS: create .dmg ──
       - name: Package macOS
         if: runner.os == 'macOS'
         run: |
-          mkdir -p dist/zk-ui.app/Contents/MacOS
-          mkdir -p dist/zk-ui.app/Contents/Resources
-          cp target/${{ matrix.target }}/release/zk-ui dist/zk-ui.app/Contents/MacOS/
-          cp Info.plist dist/zk-ui.app/Contents/
-          zip -r ${{ matrix.artifact }}.app.zip dist/zk-ui.app
+          mkdir -p build/zk-ui.app/Contents/MacOS
+          mkdir -p build/zk-ui.app/Contents/Resources
+          cp target/${{ matrix.target }}/release/zk-ui build/zk-ui.app/Contents/MacOS/
+          cp Info.plist build/zk-ui.app/Contents/
+          cp icons/zk-ui.icns build/zk-ui.app/Contents/Resources/
+          mkdir -p dmg_staging
+          cp -r build/zk-ui.app dmg_staging/
+          ln -s /Applications dmg_staging/Applications
+          hdiutil create \
+            -volname "zk-ui" \
+            -srcfolder dmg_staging \
+            -ov -format UDZO \
+            ${{ matrix.artifact }}.dmg
 
       # ── Windows: create .zip ──
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item target/${{ matrix.target }}/release/zk-ui.exe dist/
-          Compress-Archive -Path dist/* -DestinationPath ${{ matrix.artifact }}.zip
+          New-Item -ItemType Directory -Force -Path package
+          Copy-Item target/${{ matrix.target }}/release/zk-ui.exe package/
+          Compress-Archive -Path package/* -DestinationPath ${{ matrix.artifact }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -80,7 +88,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: |
             *.tar.gz
-            *.app.zip
+            *.dmg
             *.zip
 
   release:

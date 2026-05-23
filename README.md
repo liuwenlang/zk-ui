@@ -84,6 +84,16 @@ src/
 | `tracing` | 结构化日志 |
 | `chrono` | 时间戳格式化 |
 
+## 常见问题
+
+### macOS 提示 "zk-ui.app 已损坏，无法打开"
+
+这是因为应用未经过 Apple 公证，被 macOS Gatekeeper 拦截。在终端执行以下命令即可解决：
+
+```bash
+xattr -cr /path/to/zk-ui.app
+```
+
 ## License
 
 MIT

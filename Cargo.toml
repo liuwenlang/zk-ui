@@ -27,5 +27,8 @@ chrono = "0.4"
 
 rusqlite = { version = "0.31", features = ["bundled"] }
 
+[build-dependencies]
+winres = "0.1"
+
 [patch.crates-io]
 zookeeper = { path = "vendor/zookeeper" }

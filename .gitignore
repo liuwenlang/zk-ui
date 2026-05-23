@@ -1,5 +1,7 @@
 /target
 /dist
+/build
+/dmg_staging
 /.claude
 /openspec
 *.db

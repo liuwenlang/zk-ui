@@ -84,6 +84,16 @@ Connection profiles and folders are stored in a local SQLite database at:
 | `tracing` | Structured logging |
 | `chrono` | Timestamp formatting |
 
+## FAQ
+
+### macOS says "zk-ui.app is damaged and can't be opened"
+
+This is caused by macOS Gatekeeper blocking the app because it is not notarized by Apple. Run this command in Terminal to fix it:
+
+```bash
+xattr -cr /path/to/zk-ui.app
+```
+
 ## License
 
 MIT
