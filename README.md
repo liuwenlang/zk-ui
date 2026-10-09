@@ -2,19 +2,21 @@
 
 [English](README_EN.md) | 中文
 
-一个基于 Rust 和 [egui](https://www.egui.io/) 构建的 [Apache ZooKeeper](https://zookeeper.apache.org/) 原生桌面可视化管理工具。
+一个基于 Rust 和 [GPUI Kit](https://gpui-kit.com/) 构建的 [Apache ZooKeeper](https://zookeeper.apache.org/) 原生桌面可视化管理工具。界面按 PrettyZoo / Redis Insight 的三栏工作台组织，渲染走 GPU，滚动和动画跟随显示器刷新率。
 
 ## 功能特性
 
-- **树形浏览器** — 层级展示 znode 节点，支持懒加载、分批翻页和全局搜索
-- **节点管理** — 创建、删除、编辑数据、管理 ACL，支持持久、临时、持久顺序、临时顺序四种创建模式
-- **连接管理器** — 保存并组织多个 ZooKeeper 连接，支持文件夹分组和拖拽排序
-- **双语界面** — 支持中英文实时切换
-- **跨平台** — 支持 macOS、Linux、Windows，自动检测 CJK 字体
+- **三栏工作台** — 左侧连接资源管理器、中间虚拟化 znode 树、右侧检查器（数据 / ACL / 统计 / 四字命令）
+- **节点管理** — 创建、删除、清空子节点、编辑数据、管理 ACL、导入和导出子树，支持持久、临时、持久顺序、临时顺序四种创建模式
+- **大量节点** — 子节点名称按需取回，和渲染列表分开。每个展开节点先显示 200 行，可继续加载或一次显示全部；虚拟列表只绘制可见行，不为每个子节点预取 stat
+- **连接管理器** — 保存并组织多个 ZooKeeper 连接，支持文件夹分组、重命名、认证和排序
+- **搜索** — 先匹配已经加载的名称，再在后台分批遍历集群，结果出来后展开并滚到该节点。搜索不会堵住连接、刷新和编辑
+- **高刷新率** — GPUI 在界面变化时按显示器刷新率呈现；节点树只绘制可见行。标题栏可打开帧时间指示。请使用 `cargo run --release` 查看实际流畅度
+- **双语与主题** — 中英文实时切换，以及浅色 / 深色主题
 
 ## 界面概览
 
-界面由左侧边栏（资源管理器，含已保存的连接/文件夹）、工具栏和中央详情面板（显示节点属性、ACL 或统计信息）组成。
+左侧是已保存的连接和文件夹，点一下即可连接。中间是可搜索的 znode 树：展开后按页放入虚拟列表。右侧检查器用来改数据、ACL、查看 stat，或对当前集群执行 `stat` / `srvr` / `mntr` / `conf` / `envi`。
 
 ## 环境要求
 
@@ -46,7 +48,7 @@ cargo run --release -- --connect 192.168.1.100:2181 --timeout 10000
 
 ```
 src/
-├── main.rs              # 程序入口，窗口初始化
+├── main.rs              # GPUI Kit 入口，窗口按显示器刷新
 ├── config.rs            # 命令行参数解析 (clap)
 ├── db.rs                # 本地 SQLite 存储（连接配置 & 文件夹）
 ├── zk/
@@ -54,15 +56,11 @@ src/
 │   ├── types.rs         # ZK 数据类型 (NodeStat, AclEntry, CreateMode)
 │   └── client.rs        # 后台 ZK 线程管理 & 命令协议
 └── app/
-    ├── mod.rs           # ZkApp 结构体、构造函数、主布局
-    ├── types.rs         # UI 类型 (Lang, TreeNode, Tab, ConnectState, Pending)
-    ├── actions.rs       # 连接、数据加载、CRUD 操作
-    ├── respond.rs       # 异步响应通道处理
-    ├── tree.rs          # ZK 树节点渲染与交互
-    ├── icons.rs         # 自定义图标绘制（文件夹、文档、连接）
-    ├── sidebar.rs       # 侧边栏面板（资源管理器、搜索、拖拽）
-    ├── dialogs.rs       # 连接和文件夹对话框
-    └── detail.rs        # 节点详情面板（属性、ACL、统计标签页）
+    ├── mod.rs           # ZkApp 状态与输入框
+    ├── view.rs          # 三栏工作台界面
+    ├── session.rs       # 连接、树、CRUD 与响应处理
+    ├── tree_model.rs    # 节点目录与分页后的可见行（含测试）
+    └── i18n.rs          # 中英文
 ```
 
 ## 数据存储
@@ -76,7 +74,8 @@ src/
 
 | Crate | 用途 |
 |---|---|
-| `eframe` / `egui` | 即时模式 GUI 框架 |
+| `gpui-kit` | GPU 桌面 UI、组件、主题与窗口 |
+| `gpui-fps` | 帧时间指示，用来确认刷新是否跟上显示器 |
 | `zookeeper` | ZooKeeper 客户端 |
 | `rusqlite` | 本地 SQLite 数据库 |
 | `clap` | 命令行参数解析 |

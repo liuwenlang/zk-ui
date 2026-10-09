@@ -1,303 +1,252 @@
-mod actions;
-mod dialogs;
-mod detail;
-mod icons;
-mod respond;
-mod sidebar;
-mod tree;
-mod types;
+mod i18n;
+mod session;
+mod tree_model;
+mod view;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
+use std::time::Duration;
 
-use eframe::egui;
-use egui::epaint::text::{FontData, FontDefinitions, FontFamily};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::component::VirtualListScrollHandle;
+use gpui_kit::{
+    AppContext, Context, Entity, IntoElement, Pixels, Render, Size, Subscription, Window,
+};
 
 use crate::config::Cli;
-use crate::db::{ConnProfile, LocalDb};
+use crate::db::{ConnProfile, Folder, LocalDb};
 use crate::zk::{AclEntry, CreateMode, ZkManager};
 
-pub(crate) use types::*;
-
-macro_rules! t {
-    ($lang:expr, $en:expr, $zh:expr) => {
-        match $lang {
-            $crate::app::Lang::En => $en,
-            $crate::app::Lang::Zh => $zh,
-        }
-    };
-}
-pub(crate) use t;
+use i18n::Lang;
+use session::{ConnectState, InspectorTab, NodeDetail, Pending};
+use tree_model::{FlatRow, TreeCatalog};
 
 pub struct ZkApp {
-    pub(crate) zk_manager: ZkManager,
-    pub(crate) pending: Pending,
+    zk: ZkManager,
+    db: LocalDb,
+    pending: Pending,
+    lang: Lang,
+    theme_dark: bool,
+    show_fps: bool,
+    cli_hosts: String,
 
-    pub(crate) connect_state: ConnectState,
+    hosts: String,
+    timeout_ms: i32,
+    active_conn_name: String,
+    active_conn_id: Option<i64>,
+    connect_state: ConnectState,
+    pending_auth: Option<(String, String)>,
 
-    pub(crate) tree_nodes: HashMap<String, TreeNode>,
-    pub(crate) selected_path: Option<String>,
-    pub(crate) selected_folder_id: Option<i64>,
+    root_folders: Vec<Folder>,
+    root_connections: Vec<ConnProfile>,
+    folder_children: HashMap<i64, (Vec<Folder>, Vec<ConnProfile>)>,
+    expanded_folders: HashSet<i64>,
+    selected_folder_id: Option<i64>,
 
-    pub(crate) detail: Option<NodeDetail>,
-    pub(crate) active_tab: Tab,
+    tree: TreeCatalog,
+    rows: Vec<FlatRow>,
+    row_sizes: Rc<Vec<Size<Pixels>>>,
+    search_sizes: Rc<Vec<Size<Pixels>>>,
+    tree_scroll: VirtualListScrollHandle,
+    scroll_to: Option<usize>,
+    pending_reveal: Option<String>,
+    focus_child: Option<(String, String)>,
+    selected_path: Option<String>,
+    detail: Option<NodeDetail>,
+    inspector: InspectorTab,
+    edit_data: String,
+    edit_acl: Vec<AclEntry>,
+    data_dirty: bool,
+    acl_dirty: bool,
+    sync_editor: bool,
+    clear_target: Option<String>,
+    search_query: String,
+    search_results: Vec<String>,
+    search_local: Vec<String>,
+    search_remote: Vec<String>,
+    search_scanned: usize,
+    search_in_progress: bool,
+    search_generation: u64,
+    search_ticket: u64,
+    server_output: String,
+    export_text: String,
+    export_ready: bool,
+    status_message: String,
+    toast: Option<String>,
+    create_mode: CreateMode,
+    conn_edit_id: Option<i64>,
+    folder_edit_id: Option<i64>,
 
-    pub(crate) edit_data: String,
-    pub(crate) editing_data: bool,
-
-    pub(crate) show_create_dialog: bool,
-    pub(crate) create_name: String,
-    pub(crate) create_data: String,
-    pub(crate) create_mode: CreateMode,
-
-    pub(crate) edit_acl: Vec<AclEntry>,
-    pub(crate) editing_acl: bool,
-    pub(crate) new_acl_scheme: String,
-    pub(crate) new_acl_id: String,
-    pub(crate) new_acl_perms: u32,
-
-    pub(crate) search_query: String,
-    pub(crate) search_results: Vec<String>,
-    pub(crate) search_in_progress: bool,
-    pub(crate) search_generation: u64,
-    pub(crate) search_pending_after: Option<f64>,
-
-    pub(crate) status_message: String,
-    pub(crate) error_message: Option<String>,
-
-    pub(crate) confirm_delete: bool,
-    pub(crate) confirm_clear_children: Option<String>,
-    pub(crate) clear_children_target: Option<String>,
-    pub(crate) lang: Lang,
-
-    // Current connection parameters
-    pub(crate) hosts: String,
-    pub(crate) timeout_ms: i32,
-    pub(crate) active_conn_name: String,
-
-    // Local database
-    pub(crate) db: LocalDb,
-
-    // Connection manager UI
-    pub(crate) edit_conn: Option<ConnProfile>,
-    pub(crate) edit_conn_name: String,
-    pub(crate) edit_conn_hosts: String,
-    pub(crate) edit_conn_timeout: i32,
-    pub(crate) edit_conn_auth_scheme: String,
-    pub(crate) edit_conn_auth_credential: String,
-    pub(crate) edit_conn_folder_id: Option<i64>,
-    pub(crate) show_conn_dialog: bool,
-
-    // Folder management
-    pub(crate) folder_expanded: std::collections::HashSet<i64>,
-    pub(crate) show_folder_dialog: bool,
-    pub(crate) new_folder_name: String,
-    pub(crate) new_folder_parent_id: Option<i64>,
-    pub(crate) rename_folder_id: Option<i64>,
-
-    // Drag and drop
-    pub(crate) drag_state: Option<DragItem>,
-    pub(crate) active_conn_id: Option<i64>,
+    search_input: Entity<InputState>,
+    data_editor: Entity<TextareaState>,
+    conn_name: Entity<InputState>,
+    conn_hosts: Entity<InputState>,
+    conn_timeout: Entity<InputState>,
+    conn_scheme: Entity<InputState>,
+    conn_secret: Entity<InputState>,
+    node_name: Entity<InputState>,
+    node_data: Entity<InputState>,
+    folder_name: Entity<InputState>,
+    acl_scheme: Entity<InputState>,
+    acl_id: Entity<InputState>,
+    import_editor: Entity<TextareaState>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl ZkApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, _config: Cli) -> Self {
-        let mut style = (*cc.egui_ctx.style()).clone();
-        style.text_styles.insert(
-            egui::TextStyle::Body,
-            egui::FontId::new(13.0, egui::FontFamily::Proportional),
-        );
-        style.text_styles.insert(
-            egui::TextStyle::Monospace,
-            egui::FontId::new(13.0, egui::FontFamily::Monospace),
-        );
-        cc.egui_ctx.set_style(style);
-        load_cjk_font(&cc.egui_ctx);
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, cli: Cli) -> Self {
+        let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search znodes"));
+        let data_editor = cx.new(|cx| TextareaState::new(window, cx));
+        let conn_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name"));
+        let conn_hosts = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("127.0.0.1:2181")
+                .default_value(cli.connect.clone())
+        });
+        let conn_timeout =
+            cx.new(|cx| InputState::new(window, cx).default_value(cli.timeout.to_string()));
+        let conn_scheme = cx.new(|cx| InputState::new(window, cx).placeholder("digest"));
+        let conn_secret = cx.new(|cx| InputState::new(window, cx).placeholder("user:password"));
+        let node_name = cx.new(|cx| InputState::new(window, cx).placeholder("node"));
+        let node_data = cx.new(|cx| InputState::new(window, cx).placeholder(""));
+        let folder_name = cx.new(|cx| InputState::new(window, cx).placeholder("Folder"));
+        let acl_scheme = cx.new(|cx| InputState::new(window, cx).placeholder("world"));
+        let acl_id = cx.new(|cx| InputState::new(window, cx).placeholder("anyone"));
+        let import_editor = cx.new(|cx| TextareaState::new(window, cx));
 
-        Self {
-            zk_manager: ZkManager::new(),
+        let search_sub = cx.subscribe_in(&search_input, window, |this, input, event, _, cx| {
+            if !matches!(event, InputEvent::Change) {
+                return;
+            }
+            let value = input.read(cx).value().to_string();
+            this.search_ticket = this.search_ticket.wrapping_add(1);
+            let ticket = this.search_ticket;
+            cx.spawn(async move |this, async_cx| {
+                async_cx
+                    .background_executor()
+                    .timer(Duration::from_millis(220))
+                    .await;
+                let _ = this.update(async_cx, |this, cx| {
+                    if this.search_ticket == ticket {
+                        this.start_search(value);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        });
+
+        let editor_sub = cx.subscribe_in(&data_editor, window, |this, editor, event, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.edit_data = editor.read(cx).value().to_string();
+                this.data_dirty = true;
+                cx.notify();
+            }
+        });
+
+        let mut app = Self {
+            zk: ZkManager::new(),
+            db: LocalDb::new().expect("open zk-ui database"),
             pending: Pending::default(),
-
-            connect_state: ConnectState::Disconnected,
-
-            tree_nodes: HashMap::new(),
-            selected_path: None,
-            selected_folder_id: None,
-
-            detail: None,
-            active_tab: Tab::Data,
-
-            edit_data: String::new(),
-            editing_data: false,
-
-            show_create_dialog: false,
-            create_name: String::new(),
-            create_data: String::new(),
-            create_mode: CreateMode::Persistent,
-
-            edit_acl: vec![],
-            editing_acl: false,
-            new_acl_scheme: "world".into(),
-            new_acl_id: "anyone".into(),
-            new_acl_perms: 1,
-
-            search_query: String::new(),
-            search_results: Vec::new(),
-            search_in_progress: false,
-            search_generation: 0,
-            search_pending_after: None,
-
-            status_message: String::new(),
-            error_message: None,
-
-            confirm_delete: false,
-            confirm_clear_children: None,
-            clear_children_target: None,
             lang: Lang::Zh,
-
+            theme_dark: false,
+            show_fps: true,
+            cli_hosts: cli.connect,
             hosts: "127.0.0.1:2181".into(),
             timeout_ms: 5000,
             active_conn_name: String::new(),
-
-            db: LocalDb::new().expect("Failed to open local database"),
-
-            edit_conn: None,
-            edit_conn_name: String::new(),
-            edit_conn_hosts: "127.0.0.1:2181".into(),
-            edit_conn_timeout: 5000,
-            edit_conn_auth_scheme: "digest".into(),
-            edit_conn_auth_credential: String::new(),
-            edit_conn_folder_id: None,
-            show_conn_dialog: false,
-
-            folder_expanded: std::collections::HashSet::new(),
-            show_folder_dialog: false,
-            new_folder_name: String::new(),
-            new_folder_parent_id: None,
-            rename_folder_id: None,
-
-            drag_state: None,
             active_conn_id: None,
+            connect_state: ConnectState::Disconnected,
+            pending_auth: None,
+            root_folders: Vec::new(),
+            root_connections: Vec::new(),
+            folder_children: HashMap::new(),
+            expanded_folders: HashSet::new(),
+            selected_folder_id: None,
+            tree: TreeCatalog::new(),
+            rows: Vec::new(),
+            row_sizes: Rc::new(Vec::new()),
+            search_sizes: Rc::new(Vec::new()),
+            tree_scroll: VirtualListScrollHandle::new(),
+            scroll_to: None,
+            pending_reveal: None,
+            focus_child: None,
+            selected_path: None,
+            detail: None,
+            inspector: InspectorTab::Data,
+            edit_data: String::new(),
+            edit_acl: Vec::new(),
+            data_dirty: false,
+            acl_dirty: false,
+            sync_editor: false,
+            clear_target: None,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_local: Vec::new(),
+            search_remote: Vec::new(),
+            search_scanned: 0,
+            search_in_progress: false,
+            search_generation: 0,
+            search_ticket: 0,
+            server_output: String::new(),
+            export_text: String::new(),
+            export_ready: false,
+            status_message: "Ready".into(),
+            toast: None,
+            create_mode: CreateMode::Persistent,
+            conn_edit_id: None,
+            folder_edit_id: None,
+            search_input,
+            data_editor,
+            conn_name,
+            conn_hosts,
+            conn_timeout,
+            conn_scheme,
+            conn_secret,
+            node_name,
+            node_data,
+            folder_name,
+            acl_scheme,
+            acl_id,
+            import_editor,
+            _subscriptions: vec![search_sub, editor_sub],
+        };
+        app.reload_catalog();
+        if app.root_connections.is_empty() && app.root_folders.is_empty() {
+            let _ = app
+                .db
+                .add_connection("localhost", "127.0.0.1:2181", 5000, "", "", None);
+            app.reload_catalog();
         }
-    }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui) {
-        let lang = self.lang;
-        ui.horizontal(|ui| {
-            if matches!(self.connect_state, ConnectState::Connected { .. }) {
-                if ui.button(t!(lang, "R Refresh", "R 刷新")).clicked() {
-                    if let Some(path) = self.selected_path.clone() {
-                        self.load_children(&path);
-                        self.load_node_detail(&path);
-                    } else {
-                        self.load_children("/");
+        cx.spawn(async move |this, async_cx| loop {
+            let busy = this
+                .read_with(async_cx, |app, _| app.has_pending())
+                .unwrap_or(false);
+            let wait = if busy { 8 } else { 80 };
+            async_cx
+                .background_executor()
+                .timer(Duration::from_millis(wait))
+                .await;
+            if this
+                .update(async_cx, |app, cx| {
+                    if app.poll_responses() {
+                        cx.notify();
                     }
-                }
-                ui.separator();
-                if ui.button(t!(lang, "Disconnect", "断开")).clicked() {
-                    self.do_disconnect();
-                }
+                })
+                .is_err()
+            {
+                break;
             }
+        })
+        .detach();
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(self.lang.label()).clicked() {
-                    self.lang = self.lang.toggle();
-                }
-                if !self.status_message.is_empty() {
-                    ui.label(egui::RichText::new(&self.status_message).weak().size(12.0));
-                }
-            });
-        });
+        app
     }
 }
 
-impl eframe::App for ZkApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.handle_responses(ctx);
-
-        if let Some(deadline) = self.search_pending_after {
-            let now = ctx.input(|i| i.time);
-            if now >= deadline {
-                self.search_pending_after = None;
-                self.start_tree_search();
-            } else {
-                ctx.request_repaint_after(std::time::Duration::from_millis(50));
-            }
-        }
-
-        // ── Top panel: toolbar ──
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.add_space(2.0);
-            self.toolbar(ui);
-            ui.add_space(2.0);
-        });
-
-        // ── Bottom: errors ──
-        if self.error_message.is_some() {
-            egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-                if let Some(err) = &self.error_message.clone() {
-                    ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::RED, format!("! {}", err));
-                        if ui.small_button("X").clicked() {
-                            self.error_message = None;
-                        }
-                    });
-                }
-            });
-        }
-
-        // ── Left sidebar: resource manager ──
-        egui::SidePanel::left("sidebar")
-            .resizable(true)
-            .default_width(280.0)
-            .min_width(180.0)
-            .max_width(480.0)
-            .show(ctx, |ui| {
-                let w = ui.available_width();
-                ui.set_max_width(w);
-                self.sidebar_panel(ui);
-            });
-
-        // ── Central panel ──
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if self.show_conn_dialog {
-                self.show_conn_dialog_inline(ui);
-            } else if self.show_folder_dialog {
-                self.show_folder_dialog_inline(ui);
-            } else {
-                self.node_detail_panel(ui);
-            }
-        });
+impl Render for ZkApp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_workspace(window, cx)
     }
-}
-
-fn load_cjk_font(ctx: &egui::Context) {
-    let font_paths: &[&str] = &[
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/STHeiti Light.ttc",
-        "/System/Library/Fonts/Supplemental/Songti.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-        "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
-        "C:\\Windows\\Fonts\\msyh.ttc",
-        "C:\\Windows\\Fonts\\simsun.ttc",
-    ];
-
-    for path in font_paths {
-        if let Ok(data) = std::fs::read(path) {
-            tracing::info!("Loaded CJK font from {}", path);
-            let mut fonts = FontDefinitions::default();
-            let font_name = "CJK";
-            fonts.font_data.insert(font_name.to_owned(), FontData::from_owned(data));
-            for family in [FontFamily::Proportional, FontFamily::Monospace] {
-                if let Some(family_list) = fonts.families.get_mut(&family) {
-                    family_list.push(font_name.to_owned());
-                }
-            }
-            ctx.set_fonts(fonts);
-            return;
-        }
-    }
-    tracing::warn!("No CJK font found on this system — Chinese characters may display as boxes");
 }

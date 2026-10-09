@@ -7,8 +7,8 @@ description = "A native desktop GUI for browsing and managing Apache ZooKeeper"
 license = "MIT"
 
 [dependencies]
-eframe = "0.29"
-egui = "0.29"
+gpui-kit = "0.7.1"
+gpui-fps = "0.7.1"
 
 zookeeper = "0.8"
 

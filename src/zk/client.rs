@@ -1,5 +1,6 @@
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use zookeeper::{Acl, CreateMode, ZooKeeper, WatchedEvent, Watcher};
 
@@ -24,6 +25,7 @@ pub enum ZkCmd {
     AddAuth { scheme: String, credential: Vec<u8>, resp: mpsc::Sender<ZkResponse> },
     Watch { path: String, watch_type: WatchType, resp: mpsc::Sender<ZkResponse> },
     SearchNodes { query: String, max_results: usize, resp: mpsc::Sender<ZkResponse> },
+    CancelSearch,
 }
 
 #[allow(dead_code)]
@@ -52,8 +54,24 @@ pub enum ZkResponse {
     Error(String),
     WatchEvent { path: String, event_type: String },
     Disconnected,
-    SearchResults(Vec<String>),
+    SearchResults {
+        paths: Vec<String>,
+        done: bool,
+        scanned: usize,
+    },
 }
+
+struct SearchJob {
+    query: String,
+    max_results: usize,
+    stack: Vec<String>,
+    results: Vec<String>,
+    resp: mpsc::Sender<ZkResponse>,
+    scanned: usize,
+    last_emit: Option<Instant>,
+}
+
+const SEARCH_BATCH: usize = 32;
 
 struct LogWatcher;
 impl Watcher for LogWatcher {
@@ -71,14 +89,25 @@ impl ZkManager {
         thread::spawn(move || {
             let mut zk: Option<ZooKeeper> = None;
 
+            let mut search: Option<SearchJob> = None;
             loop {
-                let cmd = match rx.recv() {
-                    Ok(cmd) => cmd,
-                    Err(_) => break,
+                let cmd = if search.is_some() {
+                    match rx.try_recv() {
+                        Ok(cmd) => Some(cmd),
+                        Err(mpsc::TryRecvError::Empty) => None,
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                    }
+                } else {
+                    match rx.recv() {
+                        Ok(cmd) => Some(cmd),
+                        Err(_) => break,
+                    }
                 };
 
+                if let Some(cmd) = cmd {
                 match cmd {
                     ZkCmd::Connect { hosts, timeout_ms, resp } => {
+                        search = None;
                         match ZooKeeper::connect(&hosts, std::time::Duration::from_millis(timeout_ms as u64), LogWatcher) {
                             Ok(conn) => {
                                 zk = Some(conn);
@@ -89,7 +118,10 @@ impl ZkManager {
                             }
                         }
                     }
-                    ZkCmd::Disconnect => { zk = None; }
+                    ZkCmd::Disconnect => {
+                        search = None;
+                        zk = None;
+                    }
                     ZkCmd::GetChildren { path, resp } => {
                         match &zk {
                             Some(z) => match z.get_children(&path, false) {
@@ -247,17 +279,58 @@ impl ZkManager {
                             });
                         }
                     }
+                    ZkCmd::CancelSearch => {
+                        search = None;
+                    }
                     ZkCmd::SearchNodes { query, max_results, resp } => {
-                        match &zk {
-                            Some(z) => {
-                                let mut results = Vec::new();
-                                let q = query.to_lowercase();
-                                if !q.is_empty() {
-                                    search_nodes(z, "/", &q, &mut results, max_results);
+                        let query = query.trim().to_lowercase();
+                        if query.is_empty() || zk.is_none() {
+                            let _ = resp.send(if zk.is_none() {
+                                ZkResponse::Error("Not connected".into())
+                            } else {
+                                ZkResponse::SearchResults {
+                                    paths: Vec::new(),
+                                    done: true,
+                                    scanned: 0,
                                 }
-                                let _ = resp.send(ZkResponse::SearchResults(results));
-                            }
-                            None => { let _ = resp.send(ZkResponse::Error("Not connected".into())); }
+                            });
+                            search = None;
+                        } else {
+                            search = Some(SearchJob {
+                                query,
+                                max_results,
+                                stack: vec!["/".into()],
+                                results: Vec::new(),
+                                resp,
+                                scanned: 0,
+                                last_emit: None,
+                            });
+                        }
+                    }
+                }
+                } else if let Some(mut job) = search.take() {
+                    let finished = match &zk {
+                        Some(z) => step_search(z, &mut job, SEARCH_BATCH),
+                        None => {
+                            let _ = job.resp.send(ZkResponse::Error("Not connected".into()));
+                            true
+                        }
+                    };
+                    if zk.is_some() {
+                        let due = job
+                            .last_emit
+                            .map(|at| at.elapsed() >= Duration::from_millis(80))
+                            .unwrap_or(true);
+                        if finished || due {
+                            let _ = job.resp.send(ZkResponse::SearchResults {
+                                paths: job.results.clone(),
+                                done: finished,
+                                scanned: job.scanned,
+                            });
+                            job.last_emit = Some(Instant::now());
+                        }
+                        if !finished {
+                            search = Some(job);
                         }
                     }
                 }
@@ -319,39 +392,32 @@ fn path_matches_query(path: &str, query: &str) -> bool {
         .map_or(false, |name| name.to_lowercase().contains(query))
 }
 
-fn search_nodes(
-    zk: &ZooKeeper,
-    path: &str,
-    query: &str,
-    results: &mut Vec<String>,
-    max_results: usize,
-) {
-    if results.len() >= max_results {
-        return;
-    }
-    if path != "/" && path_matches_query(path, query) {
-        results.push(path.to_string());
-        if results.len() >= max_results {
-            return;
-        }
-    }
-    let children = match zk.get_children(path, false) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let mut children: Vec<_> = children.into_iter().collect();
-    children.sort();
-    for child in children {
-        let child_path = if path == "/" {
-            format!("/{}", child)
-        } else {
-            format!("{}/{}", path, child)
+fn step_search(zk: &ZooKeeper, job: &mut SearchJob, budget: usize) -> bool {
+    let mut used = 0;
+    while used < budget {
+        let Some(path) = job.stack.pop() else {
+            return true;
         };
-        search_nodes(zk, &child_path, query, results, max_results);
-        if results.len() >= max_results {
-            break;
+        used += 1;
+        job.scanned += 1;
+        if path != "/"
+            && path_matches_query(&path, &job.query)
+            && job.results.len() < job.max_results
+        {
+            job.results.push(path.clone());
+        }
+        if job.results.len() >= job.max_results {
+            return true;
+        }
+        let Ok(mut children) = zk.get_children(&path, false) else {
+            continue;
+        };
+        children.sort();
+        for child in children.into_iter().rev() {
+            job.stack.push(child_path(&path, &child));
         }
     }
+    job.stack.is_empty()
 }
 
 fn export_node(zk: &ZooKeeper, path: &str) -> Result<serde_json::Value, String> {

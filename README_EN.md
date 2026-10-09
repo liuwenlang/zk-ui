@@ -2,19 +2,21 @@
 
 English | [中文](README.md)
 
-A native desktop GUI for browsing and managing [Apache ZooKeeper](https://zookeeper.apache.org/) instances, built with Rust and [egui](https://www.egui.io/).
+A native desktop GUI for browsing and managing [Apache ZooKeeper](https://zookeeper.apache.org/) instances, built with Rust and [GPUI Kit](https://gpui-kit.com/). The workspace follows the three-pane layout used by PrettyZoo and Redis Insight, and the GPU renderer presents on the display refresh rate.
 
 ## Features
 
-- **Tree Explorer** — Browse znodes in a hierarchical tree with lazy-loaded children, batched pagination, and search across the entire tree.
-- **Node Management** — Create, delete, edit data, and manage ACLs for any znode. Supports Persistent, Ephemeral, Persistent Sequential, and Ephemeral Sequential create modes.
-- **Connection Manager** — Save, organize, and quickly switch between multiple ZooKeeper connections. Connections can be grouped into folders with drag-and-drop reordering.
-- **Bilingual UI** — Full English and Chinese (中文) interface, switchable at runtime.
-- **Cross-platform** — Runs on macOS, Linux, and Windows with automatic CJK font detection.
+- **Three-pane workspace** — Connection explorer, virtualized znode tree, and an inspector for data, ACL, stat, and four-letter commands.
+- **Node management** — Create, delete, clear children, edit data, manage ACLs, and import or export a subtree. Supports Persistent, Ephemeral, Persistent Sequential, and Ephemeral Sequential create modes.
+- **Large trees** — Child names stay in a catalog, separate from the render list. An expanded node shows 200 rows first, then load more or show all. The virtual list paints visible rows only and does not stat every child.
+- **Connection manager** — Save clusters, group them in folders, rename folders, store digest auth, and reorder profiles.
+- **Search** — Match names already loaded, then walk the cluster in batches on the background thread. A hit expands the path and scrolls it into view without blocking connect, refresh, or edits.
+- **High refresh** — GPUI presents when the UI changes, at the display refresh rate. The tree paints only visible rows. Toggle the frame-time HUD from the title bar. Use `cargo run --release` to judge smoothness.
+- **Language and theme** — English and Chinese at runtime, plus light and dark themes.
 
 ## Screenshots
 
-The interface consists of a left sidebar (resource manager with saved connections/folders), a toolbar, and a central detail panel showing node properties, ACLs, or statistics.
+The left column holds saved connections. The center is the znode tree, paged into a virtual list as you expand it. The right inspector edits data and ACLs, shows stat, and runs `stat`, `srvr`, `mntr`, `conf`, and `envi`.
 
 ## Requirements
 
@@ -46,7 +48,7 @@ cargo run --release -- --connect 192.168.1.100:2181 --timeout 10000
 
 ```
 src/
-├── main.rs              # Entry point, window setup
+├── main.rs              # GPUI Kit entry, display-refresh window
 ├── config.rs            # CLI argument parsing (clap)
 ├── db.rs                # Local SQLite persistence (connections & folders)
 ├── zk/
@@ -54,15 +56,11 @@ src/
 │   ├── types.rs         # ZK data types (NodeStat, AclEntry, CreateMode)
 │   └── client.rs        # Background ZK thread manager & command protocol
 └── app/
-    ├── mod.rs           # ZkApp struct, constructor, main frame layout
-    ├── types.rs         # UI types (Lang, TreeNode, Tab, ConnectState, Pending)
-    ├── actions.rs       # Connection, data loading, and CRUD operations
-    ├── respond.rs       # Async response channel handling
-    ├── tree.rs          # ZK tree node rendering and interaction
-    ├── icons.rs         # Custom icon painting (folders, documents, connections)
-    ├── sidebar.rs       # Sidebar panel (resource manager, search, drag-and-drop)
-    ├── dialogs.rs       # Connection and folder dialog modals
-    └── detail.rs        # Node detail panel (Properties, ACL, Statistics tabs)
+    ├── mod.rs           # ZkApp state and inputs
+    ├── view.rs          # Three-pane workspace
+    ├── session.rs       # Connect, tree, CRUD, and response polling
+    ├── tree_model.rs    # Visible tree rows (tested)
+    └── i18n.rs          # English and Chinese
 ```
 
 ## Data Storage
@@ -76,7 +74,8 @@ Connection profiles and folders are stored in a local SQLite database at:
 
 | Crate | Purpose |
 |---|---|
-| `eframe` / `egui` | Immediate-mode GUI framework |
+| `gpui-kit` | GPU desktop UI, components, theme, and windowing |
+| `gpui-fps` | Frame-time HUD for checking the display refresh |
 | `zookeeper` | ZooKeeper client bindings |
 | `rusqlite` | Local SQLite database |
 | `clap` | CLI argument parsing |

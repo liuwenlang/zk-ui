@@ -1,6 +1,6 @@
 use clap::Parser;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(name = "zk-ui", about = "ZooKeeper Visualization Tool")]
 pub struct Cli {
     /// ZooKeeper host:port
