@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use gpui_fps::fps_monitor;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
@@ -14,16 +12,16 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    div, px, size, ClipboardItem, Context, InteractiveElement, IntoElement, ParentElement,
-    SharedString, StatefulInteractiveElement, Styled, Window,
+    div, px, ClipboardItem, Context, InteractiveElement, IntoElement, ParentElement,
+    ScrollStrategy, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
 use crate::db::{ConnProfile, Folder};
-use crate::zk::perm_string;
+use crate::zk::{perm_string, CreateMode};
 
 use super::i18n::Lang;
 use super::session::{self, format_timestamp, ConnectState, InspectorTab};
-use super::tree_model::FlatRow;
+use super::tree_model::{FlatRow, RowKind, SEARCH_MAX_RESULTS};
 use super::ZkApp;
 
 impl ZkApp {
@@ -262,9 +260,9 @@ impl ZkApp {
                     .xsmall()
                     .icon(IconName::Folder)
                     .tooltip(self.t("New folder", "新建文件夹"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.open_folder_dialog(window, cx)),
-                    ),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_folder_dialog(None, window, cx);
+                    })),
             )
             .child(
                 Button::new("new-conn")
@@ -325,13 +323,24 @@ impl ZkApp {
                             } else {
                                 IconName::Folder
                             })
-                            .label(name)
+                            .label(name.clone())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.toggle_folder(id);
                                 cx.notify();
                             })),
                     )
                     .child(div().flex_1())
+                    .child(
+                        Button::new(format!("folder-rename-{id}"))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Settings)
+                            .tooltip(self.t("Rename folder", "重命名文件夹"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                set_input(&this.folder_name, name.clone(), window, cx);
+                                this.open_folder_dialog(Some(id), window, cx);
+                            })),
+                    )
                     .child(
                         Button::new(format!("folder-del-{id}"))
                             .ghost()
@@ -529,6 +538,31 @@ impl ZkApp {
                     })),
             )
             .child(
+                Button::new("import")
+                    .ghost()
+                    .small()
+                    .label(self.t("Import", "导入"))
+                    .tooltip(self.t(
+                        "Import a subtree from export JSON",
+                        "从导出的 JSON 导入子树",
+                    ))
+                    .disabled(!connected)
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_import_dialog(window, cx)),
+                    ),
+            )
+            .child(
+                Button::new("clear-children")
+                    .ghost()
+                    .small()
+                    .icon(IconName::Minus)
+                    .tooltip(self.t("Delete children", "清空子节点"))
+                    .disabled(!connected)
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.confirm_clear_children(window, cx)),
+                    ),
+            )
+            .child(
                 Button::new("delete-node")
                     .ghost()
                     .small()
@@ -541,30 +575,63 @@ impl ZkApp {
             )
     }
 
-    fn tree_list(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let count = self.rows.len();
-        let sizes = Rc::new(vec![size(px(28.), px(28.)); count]);
+    fn tree_list(&mut self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        if let Some(index) = self.scroll_to.take() {
+            self.tree_scroll
+                .scroll_to_item(index, ScrollStrategy::Center);
+        }
+        let sizes = self.row_sizes.clone();
         let view = cx.entity().clone();
         div()
             .size_full()
-            .child(v_virtual_list(
-                view,
-                "znode-tree",
-                sizes,
-                |this, range, _, cx| {
+            .child(
+                v_virtual_list(view, "znode-tree", sizes, |this, range, _, cx| {
                     range
                         .filter_map(|index| this.rows.get(index).cloned().map(|row| (index, row)))
                         .map(|(index, row)| this.tree_row(index, &row, cx))
                         .collect()
-                },
-            ))
+                })
+                .track_scroll(&self.tree_scroll),
+            )
             .into_any_element()
     }
 
-    fn tree_row(&self, index: usize, row: &FlatRow, cx: &mut Context<Self>) -> impl IntoElement {
+    fn tree_row(
+        &self,
+        index: usize,
+        row: &FlatRow,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        match &row.kind {
+            RowKind::Loading => self.note_row(
+                row.depth,
+                self.t("Loading children…", "正在加载子节点…"),
+                cx,
+            ),
+            RowKind::More {
+                parent,
+                shown,
+                total,
+            } => self.more_row(index, row.depth, parent, *shown, *total, cx),
+            RowKind::Node {
+                expandable,
+                expanded,
+                child_count,
+            } => self.node_row(index, row, *expandable, *expanded, *child_count, cx),
+        }
+    }
+
+    fn node_row(
+        &self,
+        index: usize,
+        row: &FlatRow,
+        expandable: bool,
+        expanded: bool,
+        child_count: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
         let selected = self.selected_path.as_deref() == Some(row.path.as_str());
         let path = row.path.clone();
-        let expandable = row.expandable;
         h_flex()
             .id(format!("zrow-{index}"))
             .h(px(28.))
@@ -592,7 +659,7 @@ impl ZkApp {
                 Button::new(format!("expand-{index}"))
                     .ghost()
                     .xsmall()
-                    .icon(if row.expanded {
+                    .icon(if expanded {
                         IconName::ChevronDown
                     } else {
                         IconName::ChevronRight
@@ -605,47 +672,153 @@ impl ZkApp {
             } else {
                 div().w(px(22.)).into_any_element()
             })
-            .child(IconName::if_expandable(row.expandable, row.expanded).into_any_element())
+            .child(IconName::if_expandable(expandable, expanded).into_any_element())
             .child(div().text_sm().child(row.name.clone()))
+            .when(child_count.unwrap_or(0) > 0, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .opacity(0.7)
+                        .child(child_count.unwrap_or(0).to_string()),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn note_row(
+        &self,
+        depth: u32,
+        text: SharedString,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        div()
+            .h(px(28.))
+            .pl(px(32. + depth as f32 * 16.))
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(text)
+            .into_any_element()
+    }
+
+    fn more_row(
+        &self,
+        index: usize,
+        depth: u32,
+        parent: &str,
+        shown: usize,
+        total: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let parent_more = parent.to_string();
+        let parent_all = parent.to_string();
+        h_flex()
+            .id(format!("more-{index}"))
+            .h(px(28.))
+            .pl(px(32. + depth as f32 * 16.))
+            .pr_2()
+            .gap_2()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(format!("{shown} / {total}"))
+            .child(
+                Button::new(format!("more-next-{index}"))
+                    .ghost()
+                    .xsmall()
+                    .label(self.t("Load more", "继续加载"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.show_more(&parent_more);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new(format!("more-all-{index}"))
+                    .ghost()
+                    .xsmall()
+                    .label(self.t("Show all", "全部显示"))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.show_all(&parent_all);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
     }
 
     fn search_list(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
-        let mut list = v_flex().p_1().gap(px(2.));
-        if self.search_in_progress && self.search_results.is_empty() {
-            list = list.child(
-                div()
-                    .p_3()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(self.t("Searching…", "搜索中…")),
-            );
+        let capped = self.search_results.len() >= SEARCH_MAX_RESULTS;
+        let progress = if self.search_in_progress {
+            self.t("Searching…", "搜索中…")
+        } else if capped {
+            self.t("Result cap reached", "已到结果上限")
+        } else {
+            self.t("Search finished", "搜索结束")
+        };
+        let summary = format!(
+            "{} {} · {} {}",
+            self.search_results.len(),
+            self.t("hits", "条"),
+            self.search_scanned,
+            progress
+        );
+        let mut column = v_flex().size_full().child(
+            div()
+                .h(px(28.))
+                .px_3()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(summary),
+        );
+        if self.search_results.is_empty() {
+            column = column.child(self.note_row(
+                0,
+                if self.search_in_progress {
+                    self.t("Searching the cluster…", "正在搜索集群…")
+                } else {
+                    self.t("No matching znodes", "没有匹配的节点")
+                },
+                cx,
+            ));
+        } else {
+            let sizes = self.search_sizes.clone();
+            let view = cx.entity().clone();
+            column = column.child(div().flex_1().min_h(px(0.)).child(v_virtual_list(
+                view,
+                "search-hits",
+                sizes,
+                |this, range, _, cx| {
+                    range
+                        .filter_map(|index| {
+                            this.search_results
+                                .get(index)
+                                .cloned()
+                                .map(|path| (index, path))
+                        })
+                        .map(|(index, path)| this.search_hit(index, path, cx))
+                        .collect()
+                },
+            )));
         }
-        for (index, path) in self.search_results.iter().cloned().enumerate() {
-            let selected = self.selected_path.as_deref() == Some(path.as_str());
-            let target = path.clone();
-            list = list.child(
-                h_flex()
-                    .id(format!("search-{index}"))
-                    .h(px(28.))
-                    .px_2()
-                    .rounded(px(6.))
-                    .bg(if selected {
-                        cx.theme().accent
-                    } else {
-                        gpui_kit::transparent_black()
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.reveal_path(&target);
-                        cx.notify();
-                    }))
-                    .child(div().text_sm().child(path)),
-            );
-        }
-        div()
-            .size_full()
-            .id("search-scroll")
-            .overflow_scroll()
-            .child(list)
-            .into_any_element()
+        column.into_any_element()
+    }
+
+    fn search_hit(&self, index: usize, path: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.selected_path.as_deref() == Some(path.as_str());
+        let target = path.clone();
+        h_flex()
+            .id(format!("search-{index}"))
+            .h(px(28.))
+            .px_2()
+            .bg(if selected {
+                cx.theme().accent
+            } else {
+                gpui_kit::transparent_black()
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.reveal_path(&target);
+                this.leave_search();
+                set_input(&this.search_input, String::new(), window, cx);
+                cx.notify();
+            }))
+            .child(div().text_sm().child(path))
     }
 
     fn inspector(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -923,16 +1096,6 @@ impl ZkApp {
                         self.server_output.clone()
                     }),
             )
-            .child(
-                Button::new("clear-children")
-                    .danger()
-                    .small()
-                    .label(self.t("Delete children", "清空子节点"))
-                    .disabled(!connected)
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.confirm_clear_children(window, cx)),
-                    ),
-            )
             .into_any_element()
     }
 
@@ -954,6 +1117,13 @@ impl ZkApp {
             .child(state)
             .child(self.active_conn_name.clone())
             .child(div().flex_1().child(self.status_message.clone()))
+            .child(format!(
+                "{} {} · {} {}",
+                self.rows.len(),
+                self.t("rows", "行"),
+                self.tree.loaded_names(),
+                self.t("names", "名称")
+            ))
             .child(self.t("GPU · display refresh", "GPU · 跟随显示器刷新率"))
     }
 
@@ -1057,9 +1227,21 @@ impl ZkApp {
         });
     }
 
-    fn open_folder_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        set_input(&self.folder_name, String::new(), window, cx);
-        let title = self.t("New folder", "新建文件夹");
+    fn open_folder_dialog(
+        &mut self,
+        edit_id: Option<i64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.folder_edit_id = edit_id;
+        if edit_id.is_none() {
+            set_input(&self.folder_name, String::new(), window, cx);
+        }
+        let title = if edit_id.is_some() {
+            self.t("Rename folder", "重命名文件夹")
+        } else {
+            self.t("New folder", "新建文件夹")
+        };
         let folder = self.folder_name.clone();
         let view = cx.entity().downgrade();
         window.open_dialog(cx, move |dialog, _, _| {
@@ -1073,7 +1255,48 @@ impl ZkApp {
                         move |_, window, cx| {
                             let _ = view.update(cx, |this, cx| {
                                 let name = this.folder_name.read(cx).value().to_string();
-                                this.create_folder(name);
+                                if let Some(id) = this.folder_edit_id {
+                                    this.rename_folder(id, name);
+                                } else {
+                                    this.create_folder(name);
+                                }
+                                cx.notify();
+                            });
+                            window.close_dialog(cx);
+                        },
+                    )),
+            )
+        });
+    }
+
+    fn open_import_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.import_editor
+            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        let editor = self.import_editor.clone();
+        let title = self.t("Import subtree", "导入子树");
+        let hint = self.t(
+            "Paste export JSON. The path inside the file is the import root.",
+            "粘贴导出的 JSON。文件里的 path 会作为导入根节点。",
+        );
+        let view = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let view = view.clone();
+            dialog.title(title.clone()).child(
+                v_flex()
+                    .gap_2()
+                    .w(px(520.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(hint.clone()),
+                    )
+                    .child(Textarea::new(&editor).h(px(240.)))
+                    .child(Button::new("do-import").primary().label("Import").on_click(
+                        move |_, window, cx| {
+                            let _ = view.update(cx, |this, cx| {
+                                let text = this.import_editor.read(cx).value().to_string();
+                                this.import_json(text);
                                 cx.notify();
                             });
                             window.close_dialog(cx);
@@ -1106,10 +1329,10 @@ impl ZkApp {
                         RadioGroup::new("create-mode")
                             .selected_index(Some(mode))
                             .children([
-                                Radio::new("persistent").label("Persistent"),
-                                Radio::new("ephemeral").label("Ephemeral"),
-                                Radio::new("pseq").label("Persistent sequential"),
-                                Radio::new("eseq").label("Ephemeral sequential"),
+                                Radio::new("persistent").label(CreateMode::Persistent.label()),
+                                Radio::new("ephemeral").label(CreateMode::Ephemeral.label()),
+                                Radio::new("pseq").label(CreateMode::PersistentSequential.label()),
+                                Radio::new("eseq").label(CreateMode::EphemeralSequential.label()),
                             ])
                             .on_change(move |index, _, cx| {
                                 let _ = view_change.update(cx, |this, cx| {

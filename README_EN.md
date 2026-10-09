@@ -7,15 +7,16 @@ A native desktop GUI for browsing and managing [Apache ZooKeeper](https://zookee
 ## Features
 
 - **Three-pane workspace** — Connection explorer, virtualized znode tree, and an inspector for data, ACL, stat, and four-letter commands.
-- **Node management** — Create, delete, clear children, edit data, and manage ACLs. Supports Persistent, Ephemeral, Persistent Sequential, and Ephemeral Sequential create modes.
-- **Connection manager** — Save clusters, group them in folders, store digest auth, and reorder profiles.
-- **Search** — Find paths across the tree and reveal the match.
+- **Node management** — Create, delete, clear children, edit data, manage ACLs, and import or export a subtree. Supports Persistent, Ephemeral, Persistent Sequential, and Ephemeral Sequential create modes.
+- **Large trees** — Child names stay in a catalog, separate from the render list. An expanded node shows 200 rows first, then load more or show all. The virtual list paints visible rows only and does not stat every child.
+- **Connection manager** — Save clusters, group them in folders, rename folders, store digest auth, and reorder profiles.
+- **Search** — Match names already loaded, then walk the cluster in batches on the background thread. A hit expands the path and scrolls it into view without blocking connect, refresh, or edits.
 - **High refresh** — GPUI presents when the UI changes, at the display refresh rate. The tree paints only visible rows. Toggle the frame-time HUD from the title bar. Use `cargo run --release` to judge smoothness.
 - **Language and theme** — English and Chinese at runtime, plus light and dark themes.
 
 ## Screenshots
 
-The left column holds saved connections. The center is the lazy znode tree. The right inspector edits data and ACLs, shows stat, and runs `stat`, `srvr`, `mntr`, `conf`, and `envi`.
+The left column holds saved connections. The center is the znode tree, paged into a virtual list as you expand it. The right inspector edits data and ACLs, shows stat, and runs `stat`, `srvr`, `mntr`, `conf`, and `envi`.
 
 ## Requirements
 

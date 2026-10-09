@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::mpsc;
+
+use gpui_kit::{px, size};
 
 use crate::db::{ConnProfile, Folder};
 use crate::zk::{AclEntry, CreateMode, NodeStat, ZkCmd, ZkResponse};
 
-use super::tree_model::{self, TreeNode, SEARCH_MAX_RESULTS};
+use super::tree_model::{self, SEARCH_MAX_RESULTS};
 use super::ZkApp;
 
 pub struct Pending {
@@ -15,7 +18,6 @@ pub struct Pending {
     pub acl: HashMap<String, mpsc::Receiver<ZkResponse>>,
     pub action: Option<mpsc::Receiver<ZkResponse>>,
     pub search: Option<(mpsc::Receiver<ZkResponse>, u64)>,
-    pub stat: HashMap<String, mpsc::Receiver<ZkResponse>>,
     pub four_letter: Option<mpsc::Receiver<ZkResponse>>,
 }
 
@@ -29,7 +31,6 @@ impl Default for Pending {
             acl: HashMap::new(),
             action: None,
             search: None,
-            stat: HashMap::new(),
             four_letter: None,
         }
     }
@@ -76,7 +77,6 @@ impl ZkApp {
             || !self.pending.children.is_empty()
             || !self.pending.data.is_empty()
             || !self.pending.acl.is_empty()
-            || !self.pending.stat.is_empty()
     }
 
     pub(crate) fn note(&mut self, message: impl Into<String>) {
@@ -129,10 +129,17 @@ impl ZkApp {
         self.active_conn_id = None;
         self.detail = None;
         self.selected_path = None;
-        self.tree_nodes.clear();
+        self.tree.clear();
         self.rows.clear();
+        self.row_sizes = Rc::new(Vec::new());
         self.search_results.clear();
+        self.search_local.clear();
+        self.search_remote.clear();
+        self.search_scanned = 0;
         self.search_in_progress = false;
+        self.pending_reveal = None;
+        self.focus_child = None;
+        self.scroll_to = None;
         self.pending = Pending::default();
         self.note("Disconnected");
     }
@@ -140,10 +147,12 @@ impl ZkApp {
     fn finish_connected(&mut self) {
         self.connect_state = ConnectState::Connected;
         self.note(format!("Connected to {}", self.hosts));
-        self.tree_nodes.clear();
-        self.tree_nodes.insert("/".into(), TreeNode::root());
+        self.tree.clear();
+        self.tree.ensure("/");
+        self.tree.expand("/");
         self.load_children("/");
         self.select_node("/");
+        self.rebuild_rows();
     }
 
     pub(crate) fn load_children(&mut self, path: &str) {
@@ -153,18 +162,6 @@ impl ZkApp {
             resp: tx,
         });
         self.pending.children.insert(path.to_string(), rx);
-    }
-
-    pub(crate) fn load_node_stat(&mut self, path: &str) {
-        if self.pending.stat.contains_key(path) {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        self.zk.send(ZkCmd::Exists {
-            path: path.to_string(),
-            resp: tx,
-        });
-        self.pending.stat.insert(path.to_string(), rx);
     }
 
     pub(crate) fn load_node_detail(&mut self, path: &str) {
@@ -192,63 +189,84 @@ impl ZkApp {
         self.edit_data.clear();
         self.edit_acl.clear();
         self.load_node_detail(path);
-        self.rebuild_rows();
     }
 
     pub(crate) fn toggle_expand(&mut self, path: &str) {
-        let Some(node) = self.tree_nodes.get_mut(path) else {
-            return;
-        };
-        if !tree_model::node_expandable(node) && node.children_loaded {
+        if !self.tree.is_expandable(path) {
             return;
         }
-        node.expanded = !node.expanded;
-        let should_load = node.expanded && !node.children_loaded;
-        if should_load {
-            self.load_children(path);
+        if self.tree.is_expanded(path) {
+            self.tree.collapse(path);
+        } else {
+            self.tree.expand(path);
+            if !self.tree.is_loaded(path) {
+                self.load_children(path);
+            }
         }
+        self.rebuild_rows();
+    }
+
+    pub(crate) fn show_more(&mut self, parent: &str) {
+        self.tree.grow_window(parent, tree_model::PAGE_SIZE);
+        self.rebuild_rows();
+    }
+
+    pub(crate) fn show_all(&mut self, parent: &str) {
+        self.tree.show_all(parent);
         self.rebuild_rows();
     }
 
     pub(crate) fn reveal_path(&mut self, path: &str) {
+        self.pending_reveal = Some(path.to_string());
+        self.expand_toward(path);
+        self.select_node(path);
+        self.rebuild_rows();
+    }
+
+    fn expand_toward(&mut self, path: &str) {
+        self.tree.ensure("/");
+        self.tree.expand("/");
+        if !self.tree.is_loaded("/") {
+            self.load_children("/");
+        }
         if path == "/" {
-            self.select_node("/");
             return;
         }
-        if let Some(root) = self.tree_nodes.get_mut("/") {
-            root.expanded = true;
-            if !root.children_loaded {
-                self.load_children("/");
-            }
-        }
         let mut current = "/".to_string();
-        for seg in path.trim_start_matches('/').split('/') {
+        for seg in path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|seg| !seg.is_empty())
+        {
+            if self.tree.is_loaded(&current) {
+                self.tree.ensure_page_includes(&current, seg);
+            }
             let child = tree_model::child_path(&current, seg);
-            self.tree_nodes
-                .entry(child.clone())
-                .or_insert_with(|| TreeNode::new(seg.to_string()));
-            if let Some(node) = self.tree_nodes.get_mut(&child) {
-                node.expanded = true;
-                if !node.children_loaded {
-                    self.load_children(&child);
-                }
+            if child == path {
+                break;
+            }
+            self.tree.ensure(&child);
+            self.tree.expand(&child);
+            if !self.tree.is_loaded(&child) {
+                self.load_children(&child);
             }
             current = child;
         }
-        self.select_node(path);
     }
 
     pub(crate) fn start_search(&mut self, query: String) {
         let query = query.trim().to_string();
         self.search_query = query.clone();
+        self.search_remote.clear();
+        self.search_scanned = 0;
         if query.is_empty() {
-            self.search_results.clear();
-            self.search_in_progress = false;
-            self.pending.search = None;
-            self.rebuild_rows();
+            self.leave_search();
             return;
         }
+        self.search_local = self.tree.catalog_matches(&query, SEARCH_MAX_RESULTS);
+        self.refresh_search_view();
         if self.connect_state != ConnectState::Connected {
+            self.search_in_progress = false;
             return;
         }
         self.search_in_progress = true;
@@ -263,6 +281,25 @@ impl ZkApp {
         self.pending.search = Some((rx, generation));
     }
 
+    pub(crate) fn leave_search(&mut self) {
+        self.search_ticket = self.search_ticket.wrapping_add(1);
+        self.search_query.clear();
+        self.search_local.clear();
+        self.search_remote.clear();
+        self.search_results.clear();
+        self.search_sizes = Rc::new(Vec::new());
+        self.search_scanned = 0;
+        self.search_in_progress = false;
+        self.pending.search = None;
+        self.zk.send(ZkCmd::CancelSearch);
+    }
+
+    fn refresh_search_view(&mut self) {
+        self.search_results =
+            tree_model::merge_search(&self.search_local, &self.search_remote, SEARCH_MAX_RESULTS);
+        self.search_sizes = Rc::new(vec![size(px(28.), px(28.)); self.search_results.len()]);
+    }
+
     pub(crate) fn create_node(&mut self, name: String, data: String, mode: CreateMode) {
         let Some(parent) = self.selected_path.clone() else {
             self.fail("Select a parent node first");
@@ -273,6 +310,10 @@ impl ZkApp {
             return;
         }
         let path = tree_model::child_path(&parent, &name);
+        self.focus_child = match mode {
+            CreateMode::Persistent | CreateMode::Ephemeral => Some((parent, name)),
+            CreateMode::PersistentSequential | CreateMode::EphemeralSequential => None,
+        };
         let (tx, rx) = mpsc::channel();
         self.zk.send(ZkCmd::Create {
             path,
@@ -500,8 +541,55 @@ impl ZkApp {
         self.reload_catalog();
     }
 
+    pub(crate) fn import_json(&mut self, text: String) {
+        let value = match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(value) => value,
+            Err(err) => {
+                self.fail(format!("Import JSON is invalid: {err}"));
+                return;
+            }
+        };
+        let Some(selected) = self.selected_path.clone() else {
+            self.fail("Select a node to import into");
+            return;
+        };
+        let path = value
+            .get("path")
+            .and_then(|item| item.as_str())
+            .unwrap_or(selected.as_str())
+            .to_string();
+        let (tx, rx) = mpsc::channel();
+        self.zk.send(ZkCmd::ImportSubtree {
+            path,
+            data: value,
+            resp: tx,
+        });
+        self.pending.action = Some(rx);
+        self.note("Importing subtree…");
+    }
+
+    pub(crate) fn rename_folder(&mut self, id: i64, name: String) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        if let Err(err) = self.db.rename_folder(id, name) {
+            self.fail(err.to_string());
+            return;
+        }
+        self.reload_catalog();
+        self.note("Folder renamed");
+    }
+
     pub(crate) fn rebuild_rows(&mut self) {
-        self.rows = tree_model::flatten(&self.tree_nodes);
+        self.rows = self.tree.flatten();
+        self.row_sizes = Rc::new(vec![size(px(28.), px(28.)); self.rows.len()]);
+        if let Some(path) = self.pending_reveal.clone() {
+            if let Some(index) = tree_model::row_index(&self.rows, &path) {
+                self.scroll_to = Some(index);
+                self.pending_reveal = None;
+            }
+        }
     }
 
     pub(crate) fn poll_responses(&mut self) -> bool {
@@ -560,32 +648,22 @@ impl ZkApp {
             }
         }
 
-        let mut stats = Vec::new();
         let children_pending = std::mem::take(&mut self.pending.children);
         let mut children_keep = HashMap::new();
         for (path, rx) in children_pending {
             match rx.try_recv() {
-                Ok(ZkResponse::Children(mut children)) => {
-                    children.sort();
-                    let node = self.tree_nodes.entry(path.clone()).or_insert_with(|| {
-                        if path == "/" {
-                            TreeNode::root()
-                        } else {
-                            TreeNode::new(
-                                path.rsplit('/').next().unwrap_or(path.as_str()).to_string(),
-                            )
+                Ok(ZkResponse::Children(children)) => {
+                    self.tree.set_children(&path, children);
+                    if let Some(target) = self.pending_reveal.clone() {
+                        self.expand_toward(&target);
+                    }
+                    if let Some((parent, name)) = self.focus_child.clone() {
+                        if parent == path {
+                            self.tree.ensure_page_includes(&parent, &name);
+                            let child = tree_model::child_path(&parent, &name);
+                            self.pending_reveal = Some(child);
+                            self.focus_child = None;
                         }
-                    });
-                    node.children = children.clone();
-                    node.children_loaded = true;
-                    node.num_children = Some(children.len() as i32);
-                    node.expanded = true;
-                    for child in &children {
-                        let child_path = tree_model::child_path(&path, child);
-                        self.tree_nodes
-                            .entry(child_path.clone())
-                            .or_insert_with(|| TreeNode::new(child.clone()));
-                        stats.push(child_path);
                     }
                     changed = true;
                 }
@@ -601,33 +679,6 @@ impl ZkApp {
             }
         }
         self.pending.children = children_keep;
-        for path in stats {
-            self.load_node_stat(&path);
-        }
-
-        let mut done = Vec::new();
-        for (path, rx) in &self.pending.stat {
-            if let Ok(resp) = rx.try_recv() {
-                match resp {
-                    ZkResponse::Stat(stat) => {
-                        if let Some(node) = self.tree_nodes.get_mut(path) {
-                            node.num_children = Some(stat.num_children);
-                        }
-                    }
-                    ZkResponse::Error(_) => {
-                        if let Some(node) = self.tree_nodes.get_mut(path) {
-                            node.num_children = Some(0);
-                        }
-                    }
-                    _ => {}
-                }
-                done.push(path.clone());
-                changed = true;
-            }
-        }
-        for path in done {
-            self.pending.stat.remove(&path);
-        }
 
         let mut done = Vec::new();
         for (path, rx) in &self.pending.data {
@@ -679,27 +730,45 @@ impl ZkApp {
         }
 
         if let Some((rx, generation)) = self.pending.search.take() {
-            match rx.try_recv() {
-                Ok(ZkResponse::SearchResults(paths)) => {
-                    if generation == self.search_generation {
-                        self.search_results = paths;
-                        self.search_in_progress = false;
-                        changed = true;
+            let mut latest = None;
+            let mut disconnected = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(resp) => latest = Some(resp),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
                     }
                 }
-                Ok(ZkResponse::Error(message)) => {
-                    if generation == self.search_generation {
+            }
+            if generation == self.search_generation {
+                match latest {
+                    Some(ZkResponse::SearchResults {
+                        paths,
+                        done,
+                        scanned,
+                    }) => {
+                        self.search_remote = paths;
+                        self.search_scanned = scanned;
+                        self.search_in_progress = !done;
+                        self.refresh_search_view();
+                        changed = true;
+                    }
+                    Some(ZkResponse::Error(message)) => {
                         self.search_in_progress = false;
                         self.fail(message);
                         changed = true;
                     }
+                    _ if disconnected => {
+                        self.search_in_progress = false;
+                        changed = true;
+                    }
+                    _ => {}
                 }
-                Ok(_) => {}
-                Err(mpsc::TryRecvError::Empty) => self.pending.search = Some((rx, generation)),
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    self.search_in_progress = false;
-                    changed = true;
-                }
+            }
+            if !disconnected && generation == self.search_generation && self.search_in_progress {
+                self.pending.search = Some((rx, generation));
             }
         }
 
@@ -749,29 +818,31 @@ impl ZkApp {
                 self.note("Node deleted");
                 if let Some(path) = self.selected_path.clone() {
                     let parent = tree_model::parent_path(&path).to_string();
-                    self.tree_nodes.remove(&path);
+                    let name = tree_model::node_name(&path);
+                    self.tree.remove_child_name(&parent, &name);
+                    self.tree.forget(&path);
                     self.load_children(&parent);
                     self.select_node(&parent);
+                    self.rebuild_rows();
                 }
             }
             ZkResponse::ChildrenCleared(count) => {
                 self.note(format!("Cleared {count} node(s)"));
                 if let Some(path) = self.clear_target.take() {
-                    let prefix = if path == "/" {
-                        "/".to_string()
-                    } else {
-                        format!("{path}/")
-                    };
-                    self.tree_nodes.retain(|key, _| {
-                        key == &path || (path != "/" && !key.starts_with(&prefix))
-                    });
-                    if let Some(node) = self.tree_nodes.get_mut(&path) {
-                        node.children.clear();
-                        node.num_children = Some(0);
-                        node.children_loaded = true;
-                    }
+                    self.tree.drop_descendants(&path);
                     self.load_children(&path);
                     self.load_node_detail(&path);
+                    self.rebuild_rows();
+                }
+            }
+            ZkResponse::ImportDone => {
+                self.note("Import finished");
+                if let Some(path) = self.selected_path.clone() {
+                    self.tree.drop_descendants(&path);
+                    self.tree.expand(&path);
+                    self.load_children(&path);
+                    self.load_node_detail(&path);
+                    self.rebuild_rows();
                 }
             }
             ZkResponse::SetData => {

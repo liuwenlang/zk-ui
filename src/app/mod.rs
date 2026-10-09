@@ -4,10 +4,14 @@ mod tree_model;
 mod view;
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
-use gpui_kit::{AppContext, Context, Entity, IntoElement, Render, Subscription, Window};
+use gpui_kit::component::VirtualListScrollHandle;
+use gpui_kit::{
+    AppContext, Context, Entity, IntoElement, Pixels, Render, Size, Subscription, Window,
+};
 
 use crate::config::Cli;
 use crate::db::{ConnProfile, Folder, LocalDb};
@@ -15,7 +19,7 @@ use crate::zk::{AclEntry, CreateMode, ZkManager};
 
 use i18n::Lang;
 use session::{ConnectState, InspectorTab, NodeDetail, Pending};
-use tree_model::{FlatRow, TreeNode};
+use tree_model::{FlatRow, TreeCatalog};
 
 pub struct ZkApp {
     zk: ZkManager,
@@ -39,8 +43,14 @@ pub struct ZkApp {
     expanded_folders: HashSet<i64>,
     selected_folder_id: Option<i64>,
 
-    tree_nodes: HashMap<String, TreeNode>,
+    tree: TreeCatalog,
     rows: Vec<FlatRow>,
+    row_sizes: Rc<Vec<Size<Pixels>>>,
+    search_sizes: Rc<Vec<Size<Pixels>>>,
+    tree_scroll: VirtualListScrollHandle,
+    scroll_to: Option<usize>,
+    pending_reveal: Option<String>,
+    focus_child: Option<(String, String)>,
     selected_path: Option<String>,
     detail: Option<NodeDetail>,
     inspector: InspectorTab,
@@ -52,6 +62,9 @@ pub struct ZkApp {
     clear_target: Option<String>,
     search_query: String,
     search_results: Vec<String>,
+    search_local: Vec<String>,
+    search_remote: Vec<String>,
+    search_scanned: usize,
     search_in_progress: bool,
     search_generation: u64,
     search_ticket: u64,
@@ -62,6 +75,7 @@ pub struct ZkApp {
     toast: Option<String>,
     create_mode: CreateMode,
     conn_edit_id: Option<i64>,
+    folder_edit_id: Option<i64>,
 
     search_input: Entity<InputState>,
     data_editor: Entity<TextareaState>,
@@ -75,6 +89,7 @@ pub struct ZkApp {
     folder_name: Entity<InputState>,
     acl_scheme: Entity<InputState>,
     acl_id: Entity<InputState>,
+    import_editor: Entity<TextareaState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -97,6 +112,7 @@ impl ZkApp {
         let folder_name = cx.new(|cx| InputState::new(window, cx).placeholder("Folder"));
         let acl_scheme = cx.new(|cx| InputState::new(window, cx).placeholder("world"));
         let acl_id = cx.new(|cx| InputState::new(window, cx).placeholder("anyone"));
+        let import_editor = cx.new(|cx| TextareaState::new(window, cx));
 
         let search_sub = cx.subscribe_in(&search_input, window, |this, input, event, _, cx| {
             if !matches!(event, InputEvent::Change) {
@@ -147,8 +163,14 @@ impl ZkApp {
             folder_children: HashMap::new(),
             expanded_folders: HashSet::new(),
             selected_folder_id: None,
-            tree_nodes: HashMap::new(),
+            tree: TreeCatalog::new(),
             rows: Vec::new(),
+            row_sizes: Rc::new(Vec::new()),
+            search_sizes: Rc::new(Vec::new()),
+            tree_scroll: VirtualListScrollHandle::new(),
+            scroll_to: None,
+            pending_reveal: None,
+            focus_child: None,
             selected_path: None,
             detail: None,
             inspector: InspectorTab::Data,
@@ -160,6 +182,9 @@ impl ZkApp {
             clear_target: None,
             search_query: String::new(),
             search_results: Vec::new(),
+            search_local: Vec::new(),
+            search_remote: Vec::new(),
+            search_scanned: 0,
             search_in_progress: false,
             search_generation: 0,
             search_ticket: 0,
@@ -170,6 +195,7 @@ impl ZkApp {
             toast: None,
             create_mode: CreateMode::Persistent,
             conn_edit_id: None,
+            folder_edit_id: None,
             search_input,
             data_editor,
             conn_name,
@@ -182,6 +208,7 @@ impl ZkApp {
             folder_name,
             acl_scheme,
             acl_id,
+            import_editor,
             _subscriptions: vec![search_sub, editor_sub],
         };
         app.reload_catalog();
